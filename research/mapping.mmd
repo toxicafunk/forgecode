@@ -1,0 +1,44 @@
+stateDiagram-v2
+    [*] --> Request
+
+    Request: Build context + send chat request
+    note right of Request
+      on_request hooks run
+      (includes doom-loop detector/reminder)
+    end note
+
+    Request --> Retry: Retryable error
+    Retry --> Request: Backoff + retry
+    Request --> Interrupt: Non-retryable / retries exhausted
+    Request --> Response: Model response received
+
+    Response: Handle model output
+    note right of Response
+      on_response hooks run
+      (includes compaction check)
+    end note
+
+    Response --> Complete: finish_reason=stop AND no tool_calls
+    Response --> Yield: followup tool requested
+    Response --> Tools: tool_calls present
+
+    Tools: Execute tool calls sequentially
+    Tools --> Append
+
+    Append: Append assistant msg + tool calls + tool results to context
+    Append --> Interrupt: max tool-failure limit reached
+    Append --> Interrupt: max requests/turn reached
+    Append --> Request: continue next pass
+
+    Complete --> [*]
+    Yield --> [*]
+    Interrupt --> [*]
+
+%%Source mapping:
+%%• Loop + request/response/tool execution + append: crates/forge_app/src/orch.rs:209-312
+%%• Completion condition (stop + no tool calls): crates/forge_app/src/orch.rs:264-268
+%%• Yield condition (followup tool): crates/forge_app/src/orch.rs:270-275, crates/forge_domain/src/tools/catalog.rs:844-850
+%%• Interrupts (tool-failure limit, max requests/turn): crates/forge_app/src/orch.rs:313-351, crates/forge_domain/src/chat_response.rs:97-105
+%%• Retry behavior: crates/forge_app/src/orch.rs:224-253, crates/forge_app/src/retry.rs:16-38
+%%• Doom-loop request hook: crates/forge_app/src/app.rs:149, crates/forge_app/src/hooks/doom_loop.rs:222-245
+%%• Compaction response hook: crates/forge_app/src/app.rs:150-154, crates/forge_app/src/hooks/compaction.rs:31-45

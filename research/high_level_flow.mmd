@@ -1,0 +1,24 @@
+flowchart TD
+    A[User prompt] --> B[Build/refresh context<br/>messages + tool definitions]
+    B --> C["Request phase<br/> (on_request hooks)"]
+    C --> D[Send model call]
+
+    D --> E{Call error?}
+    E -- Retryable --> R[Retry with backoff] --> D
+    E -- Non-retryable / exhausted --> X[Interrupt/exit]
+
+    E -- No --> F["Model response<br/>(on_response hooks)"]
+    F --> G{finish=stop AND no tool calls?}
+    G -- Yes --> TC[TaskComplete] --> Z([End])
+
+    G -- No --> H{followup tool requested?}
+    H -- Yes --> Y[Yield to user for clarification] --> Z
+
+    H -- No --> I[Execute tool calls]
+    I --> J[Per-call guards:<br/>allowed tool, policy checks,<br/>timeout, read-before-edit]
+    J --> K["Run tool implementation<br/>(file/shell/fetch/agent/MCP)"]
+    K --> L[Collect tool outputs]
+    L --> M[Append assistant output + tool results to context]
+    M --> N{Limits reached?<br/>max tool failures or max requests/turn}
+    N -- Yes --> X
+    N -- No --> C

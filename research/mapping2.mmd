@@ -1,0 +1,31 @@
+stateDiagram-v2
+    [*] --> Request
+
+    Request --> Retry: Retryable error
+    Retry --> Request: Backoff + retry
+    Request --> Interrupt: Non-retryable / retries exhausted
+    Request --> Response: Model response received
+
+    Response --> Complete: finish_reason=stop AND no tool_calls
+    Response --> Yield: followup tool requested
+    Response --> Tools: tool_calls present
+
+    Tools --> Append: Execute tools sequentially
+
+    Append --> Interrupt: max tool-failure limit reached
+    Append --> Interrupt: max requests/turn reached
+    Append --> Request: continue next pass
+
+    Complete --> [*]
+    Yield --> [*]
+    Interrupt --> [*]
+
+    note right of Request
+      on_request hooks run
+      (doom-loop detector can inject reminder)
+    end note
+
+    note right of Response
+      on_response hooks run
+      (compaction can mutate context)
+    end note
