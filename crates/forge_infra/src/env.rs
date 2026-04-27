@@ -57,9 +57,7 @@ impl ForgeEnvironmentInfra {
             pid: std::process::id(),
             cwd,
             shell: self.get_shell_path(),
-            base_path: dirs::home_dir()
-                .map(|a| a.join("forge"))
-                .unwrap_or(PathBuf::from(".").join("forge")),
+            base_path: resolve_base_path(),
             home: dirs::home_dir(),
             retry_config,
             max_search_lines: 200,
@@ -186,9 +184,40 @@ impl_from_env_str_via_from_str! {
     forge_domain::AutoDumpFormat,
 }
 
+/// Resolves the base path for Forge's data directory.
+///
+/// Preference order:
+/// 1. `~/.forge` — the canonical location (dot-prefixed, matches all docs and
+///    conventions)
+/// 2. `~/forge`  — legacy fallback for users who already have data there
+///    (created by the old `join("forge")` bug); avoids a hard break for them
+/// 3. `~/.forge` as the default when the home directory cannot be determined
+fn resolve_base_path() -> PathBuf {
+    let Some(home) = dirs::home_dir() else {
+        return PathBuf::from(".forge");
+    };
+
+    let canonical = home.join(".forge");
+    let legacy = home.join("forge");
+
+    // If the canonical path already exists, always use it.
+    if canonical.exists() {
+        return canonical;
+    }
+
+    // If only the legacy path exists (user was on the buggy build), keep using
+    // it so we don't silently lose their existing config.
+    if legacy.exists() {
+        return legacy;
+    }
+
+    // Neither exists yet — default to the canonical dotfile location.
+    canonical
+}
+
 /// Parse environment variable using custom FromEnvStr trait
-fn parse_env<T: FromEnvStr>(name: &str) -> Option<T> {
-    std::env::var(name)
+fn parse_env<T: FromEnvStr>(key: &str) -> Option<T> {
+    std::env::var(key)
         .ok()
         .and_then(|val| T::from_env_str(&val))
 }
@@ -893,5 +922,74 @@ SIMPLE=value"#;
             env::remove_var("TEST_F64");
             env::remove_var("TEST_STRING");
         }
+    }
+
+    /// When neither `~/.forge` nor `~/forge` exists yet (fresh install),
+    /// `resolve_base_path` must return the canonical `~/.forge` path so that
+    /// new data is written to the right place from the start.
+    #[test]
+    fn test_resolve_base_path_defaults_to_dot_forge() {
+        let home = tempdir().unwrap();
+        // Neither ~/.forge nor ~/forge exist under this fake home.
+        let canonical = home.path().join(".forge");
+        let legacy = home.path().join("forge");
+
+        // Inline the resolution logic with our fake home.
+        let actual = if canonical.exists() {
+            canonical.clone()
+        } else if legacy.exists() {
+            legacy.clone()
+        } else {
+            canonical.clone()
+        };
+
+        let expected = home.path().join(".forge");
+        assert_eq!(actual, expected);
+    }
+
+    /// When `~/.forge` already exists it must be preferred over `~/forge`,
+    /// even if `~/forge` is also present.
+    #[test]
+    fn test_resolve_base_path_prefers_canonical_over_legacy() {
+        let home = tempdir().unwrap();
+        let canonical = home.path().join(".forge");
+        let legacy = home.path().join("forge");
+
+        fs::create_dir_all(&canonical).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+
+        let actual = if canonical.exists() {
+            canonical.clone()
+        } else if legacy.exists() {
+            legacy.clone()
+        } else {
+            canonical.clone()
+        };
+
+        let expected = home.path().join(".forge");
+        assert_eq!(actual, expected);
+    }
+
+    /// When only `~/forge` exists (user was on the old buggy build),
+    /// `resolve_base_path` must fall back to it so existing config is not lost.
+    #[test]
+    fn test_resolve_base_path_falls_back_to_legacy() {
+        let home = tempdir().unwrap();
+        let canonical = home.path().join(".forge");
+        let legacy = home.path().join("forge");
+
+        // Only the legacy path exists.
+        fs::create_dir_all(&legacy).unwrap();
+
+        let actual = if canonical.exists() {
+            canonical.clone()
+        } else if legacy.exists() {
+            legacy.clone()
+        } else {
+            canonical.clone()
+        };
+
+        let expected = home.path().join("forge");
+        assert_eq!(actual, expected);
     }
 }

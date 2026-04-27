@@ -18,6 +18,13 @@ pub struct ForgeMcpService<M, I, C> {
     tools: Arc<RwLock<HashMap<ToolName, ToolHolder<McpExecutor<C>>>>>,
     failed_servers: Arc<RwLock<HashMap<ServerName, String>>>,
     previous_config_hash: Arc<Mutex<u64>>,
+    /// Serializes concurrent initialization attempts so that only one
+    /// `update_mcp` runs at a time. Without this lock, a second caller could
+    /// observe `previous_config_hash` already set to the new value (written at
+    /// the top of the old `update_mcp`) while `self.tools` is still empty
+    /// because connections haven't finished yet, causing random "Tool not
+    /// found" errors.
+    init_lock: Arc<Mutex<()>>,
     manager: Arc<M>,
     infra: Arc<I>,
 }
@@ -41,6 +48,7 @@ where
             tools: Default::default(),
             failed_servers: Default::default(),
             previous_config_hash: Arc::new(Mutex::new(Default::default())),
+            init_lock: Arc::new(Mutex::new(())),
             manager,
             infra,
         }
@@ -96,7 +104,16 @@ where
     async fn init_mcp(&self) -> anyhow::Result<()> {
         let mcp = self.manager.read_mcp_config(None).await?;
 
-        // If config is unchanged, skip reinitialization
+        // Fast path: config unchanged, tools already populated.
+        if !self.is_config_modified(&mcp).await {
+            return Ok(());
+        }
+
+        // Slow path: serialize concurrent initialization attempts.
+        // Another task may have completed initialization while we waited for
+        // the lock, so we double-check the hash before proceeding.
+        let _guard = self.init_lock.lock().await;
+
         if !self.is_config_modified(&mcp).await {
             return Ok(());
         }
@@ -105,9 +122,13 @@ where
     }
 
     async fn update_mcp(&self, mcp: McpConfig) -> Result<(), anyhow::Error> {
-        // Update the hash with the new config
+        // Compute the hash before consuming `mcp`, but do NOT write it yet.
+        // Writing it only after all connections complete ensures that any
+        // concurrent caller waiting on `init_lock` will observe the hash
+        // already set AND `self.tools` fully populated when it re-checks
+        // `is_config_modified` inside `init_mcp`.
         let new_hash = mcp.cache_key();
-        *self.previous_config_hash.lock().await = new_hash;
+
         self.clear_tools().await;
 
         // Clear failed servers map before attempting new connections
@@ -143,6 +164,12 @@ where
                 }
             }
         }
+
+        // Stamp the hash only after all connections (successful or failed) have
+        // been processed.  Any concurrent `init_mcp` that was waiting on
+        // `init_lock` will now see `is_config_modified` return false and exit
+        // early — at which point `self.tools` is already fully populated.
+        *self.previous_config_hash.lock().await = new_hash;
 
         Ok(())
     }
@@ -390,6 +417,47 @@ mod tests {
         service.get_mcp_servers().await.unwrap();
         let actual = connect_count.load(Ordering::SeqCst);
         let expected = 2;
+        assert_eq!(actual, expected);
+    }
+
+    /// Two concurrent `init_mcp` calls must not race: the second caller must
+    /// wait for the first to finish populating `self.tools` before it checks
+    /// `is_config_modified`.  With the old code the hash was written at the
+    /// TOP of `update_mcp`, so the second caller would see an up-to-date hash
+    /// but an empty tool map, returning a spurious "Tool not found" error.
+    ///
+    /// This test simulates the race by sharing one `Arc<ForgeMcpService>` and
+    /// issuing two concurrent `init_mcp` calls (via `get_mcp_servers` which
+    /// ultimately calls `init_mcp`).  After both settle, the tool map must
+    /// contain the expected tool and `execute_mcp` must succeed.
+    #[tokio::test]
+    async fn test_concurrent_init_does_not_race() {
+        let (service, _connect_count) = fixture();
+        let service = Arc::new(service);
+
+        // Fire two concurrent initializations.
+        let s1 = service.clone();
+        let s2 = service.clone();
+        let (r1, r2) = tokio::join!(s1.get_mcp_servers(), s2.get_mcp_servers());
+        r1.unwrap();
+        r2.unwrap();
+
+        // Determine the actual prefixed tool name (mock returns "mock_tool").
+        let servers = service.get_mcp_servers().await.unwrap();
+        let tool_name = servers
+            .get_servers()
+            .values()
+            .flat_map(|tools| tools.iter())
+            .next()
+            .expect("at least one tool must be registered")
+            .name
+            .clone();
+
+        // Executing the tool must succeed — it would panic with "Tool not
+        // found" if `self.tools` was empty due to the race.
+        let call = forge_app::domain::ToolCallFull::new(tool_name);
+        let actual = service.execute_mcp(call).await.unwrap();
+        let expected = ToolOutput::text("mock result");
         assert_eq!(actual, expected);
     }
 
