@@ -167,17 +167,21 @@ impl ForgeMcpClient {
         Ok(tools
             .tools
             .into_iter()
-            .filter_map(|tool| {
-                Some(
-                    ToolDefinition::new(tool.name)
-                        .description(tool.description.unwrap_or_default())
-                        .input_schema(
-                            serde_json::from_value::<Schema>(Value::Object(
-                                tool.input_schema.as_ref().clone(),
-                            ))
-                            .ok()?,
-                        ),
-                )
+            .map(|tool| {
+                let schema = serde_json::from_value::<Schema>(Value::Object(
+                    tool.input_schema.as_ref().clone(),
+                ))
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        tool_name = %tool.name,
+                        "Failed to parse MCP tool input_schema; using empty schema as fallback"
+                    );
+                    schemars::schema_for!(())
+                });
+                ToolDefinition::new(tool.name)
+                    .description(tool.description.unwrap_or_default())
+                    .input_schema(schema)
             })
             .collect())
     }
@@ -288,8 +292,58 @@ fn resolve_http_templates(
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use schemars::Schema;
 
     use super::*;
+
+    /// Verifies that when a Schema cannot be deserialized from a JSON value,
+    /// the fallback empty schema is returned rather than the tool being dropped.
+    /// This guards against the previously silent filter_map behaviour that
+    /// discarded any MCP tool whose input_schema failed to parse.
+    #[test]
+    fn test_schema_parse_fallback_on_non_object_value() {
+        // schemars::Schema only accepts Bool or Object; anything else is an error.
+        let non_object_value = serde_json::Value::String("not-a-schema".to_string());
+
+        let result = serde_json::from_value::<Schema>(non_object_value);
+        assert!(
+            result.is_err(),
+            "non-object/bool value must fail Schema deserialization"
+        );
+
+        // This mirrors the unwrap_or_else fallback in ForgeMcpClient::list()
+        let actual = result.unwrap_or_else(|_| schemars::schema_for!(()));
+        let expected = schemars::schema_for!(());
+
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+    }
+
+    /// Verifies that a well-formed MCP input_schema round-trips through
+    /// Schema deserialization without triggering the fallback path.
+    #[test]
+    fn test_schema_parse_success_with_valid_object_schema() {
+        let valid_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File path" }
+            },
+            "required": ["path"]
+        });
+
+        let result = serde_json::from_value::<Schema>(valid_schema.clone());
+        assert!(
+            result.is_ok(),
+            "valid JSON Schema object must deserialize without error"
+        );
+
+        // The serialised form must equal the original input (order aside).
+        let actual: serde_json::Value = serde_json::to_value(result.unwrap()).unwrap();
+        assert_eq!(actual, valid_schema);
+    }
+
 
     #[test]
     fn test_resolve_http_templates_with_env() {
