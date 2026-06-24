@@ -46,6 +46,39 @@ impl GrumpyHandler {
         Self
     }
 
+    /// Resolves the path to the `grumpy` binary.
+    ///
+    /// Checks `PATH` first (correct when ForgeCode is launched from a terminal),
+    /// then falls back to well-known install locations that GUI-launched
+    /// processes on macOS miss because their `PATH` is stripped to the
+    /// launch-services default (`/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin`).
+    fn grumpy_bin() -> Option<std::path::PathBuf> {
+        use std::path::PathBuf;
+
+        // 1. Walk PATH — works for terminal-launched ForgeCode.
+        if let Ok(path_var) = std::env::var("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                let candidate = dir.join("grumpy");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        // 2. Probe well-known locations missed by GUI-launched processes.
+        //    grumpy's installer puts the binary in ~/.local/bin by default.
+        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        [
+            home.as_ref().map(|h| h.join(".local/bin/grumpy")),
+            home.as_ref().map(|h| h.join(".cargo/bin/grumpy")),
+            Some(PathBuf::from("/usr/local/bin/grumpy")),
+            Some(PathBuf::from("/opt/homebrew/bin/grumpy")),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file())
+    }
+
     /// Runs `grumpy hook <sub_command>` with `payload` piped to stdin.
     ///
     /// # Returns
@@ -53,8 +86,9 @@ impl GrumpyHandler {
     /// `Some(stderr)` when grumpy exits with code 2 (action blocked), or
     /// `None` when grumpy is not installed, not active, or allows the action.
     fn call_grumpy(sub_command: &str, payload: &Value, active_id: &str) -> Option<String> {
+        let bin = Self::grumpy_bin()?;
         let payload_str = serde_json::to_string(payload).ok()?;
-        let mut child = Command::new("grumpy")
+        let mut child = Command::new(bin)
             .args(["hook", sub_command])
             .env("GRUMPY_ACTIVE_ID", active_id)
             .stdin(Stdio::piped())
@@ -210,6 +244,35 @@ mod tests {
         let mut conv = Conversation::generate();
         conv.context = Some(Context::default());
         conv
+    }
+
+    // ── GrumpyHandler::grumpy_bin ────────────────────────────────────────────
+
+    #[test]
+    fn test_grumpy_bin_returns_existing_path_or_none() {
+        // We can't assert a specific path since the environment varies, but we
+        // can assert that if it returns Some, the path actually exists on disk.
+        if let Some(bin) = GrumpyHandler::grumpy_bin() {
+            assert!(
+                bin.is_file(),
+                "grumpy_bin() returned a path that is not a file: {bin:?}"
+            );
+        }
+        // Returning None is also valid — grumpy may not be installed in CI.
+    }
+
+    #[test]
+    fn test_grumpy_bin_prefers_path_over_hardcoded() {
+        // If grumpy is on PATH, grumpy_bin() must return a path whose binary
+        // name is "grumpy" (not one of the hardcoded fallbacks).
+        if let Ok(path_var) = std::env::var("PATH") {
+            let on_path = std::env::split_paths(&path_var)
+                .map(|d| d.join("grumpy"))
+                .find(|p| p.is_file());
+            if let (Some(expected), Some(actual)) = (on_path, GrumpyHandler::grumpy_bin()) {
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     // ── GrumpyHandler::extract_arg ───────────────────────────────────────────

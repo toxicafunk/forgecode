@@ -11,7 +11,7 @@ function _forge_action_default() {
     local user_action="$1"
     local input_text="$2"
     local command_type=""
-    
+
     # Validate that the command exists in show-commands (if user_action is provided)
     if [[ -n "$user_action" ]]; then
         local commands_list=$(_forge_get_commands)
@@ -23,7 +23,7 @@ function _forge_action_default() {
                 _forge_log error "Command '\033[1m${user_action}\033[0m' not found"
                 return 0
             fi
-            
+
             # Extract the command type from the second field (TYPE column)
             # Format: "COMMAND_NAME    TYPE    DESCRIPTION"
             command_type=$(echo "$command_row" | awk '{print $2}')
@@ -35,19 +35,19 @@ function _forge_action_default() {
                     # Use helper but don't track previous for auto-generation
                     _FORGE_CONVERSATION_ID="$new_id"
                 fi
-                
+
                 echo
                 # Execute custom command with execute subcommand
                 if [[ -n "$input_text" ]]; then
-                    _forge_exec cmd execute --cid "$_FORGE_CONVERSATION_ID" "$user_action" "$input_text"
+                    _forge_exec_interactive cmd execute --cid "$_FORGE_CONVERSATION_ID" "$user_action" "$input_text"
                 else
-                    _forge_exec cmd execute --cid "$_FORGE_CONVERSATION_ID" "$user_action"
+                    _forge_exec_interactive cmd execute --cid "$_FORGE_CONVERSATION_ID" "$user_action"
                 fi
                 return 0
             fi
         fi
     fi
-    
+
     # If input_text is empty, just set the active agent (only for AGENT type commands)
     if [[ -z "$input_text" ]]; then
         if [[ -n "$user_action" ]]; then
@@ -63,24 +63,24 @@ function _forge_action_default() {
         fi
         return 0
     fi
-    
+
     # Generate conversation ID if needed (don't track previous for auto-generation)
     if [[ -z "$_FORGE_CONVERSATION_ID" ]]; then
         local new_id=$($_FORGE_BIN conversation new)
         # Use direct assignment here - no previous to track for auto-generation
         _FORGE_CONVERSATION_ID="$new_id"
     fi
-    
+
     echo
-    
+
     # Only set the agent if user explicitly specified one
     if [[ -n "$user_action" ]]; then
         _FORGE_ACTIVE_AGENT="$user_action"
     fi
-    
+
     # Execute the forge command directly with proper escaping
     _forge_exec_interactive -p "$input_text" --cid "$_FORGE_CONVERSATION_ID"
-    
+
     # Start background sync job if enabled and not already running
     _forge_start_background_sync
     # Start background update check
@@ -90,11 +90,11 @@ function _forge_action_default() {
 function forge-accept-line() {
     # Save the original command for history
     local original_buffer="$BUFFER"
-    
+
     # Parse the buffer first in parent shell context to avoid subshell issues
     local user_action=""
     local input_text=""
-    
+
     # Check if the line starts with any of the supported patterns
     if [[ "$BUFFER" =~ "^:([a-zA-Z][a-zA-Z0-9_-]*)( (.*))?$" ]]; then
         # Action with or without parameters: :foo or :foo bar baz
@@ -114,16 +114,16 @@ function forge-accept-line() {
         zle accept-line
         return
     fi
-    
+
     # Add the original command to history before transformation
     print -s -- "$original_buffer"
-    
+
     # CRITICAL: Move cursor to end so output doesn't overwrite
     # Don't clear BUFFER yet - let _forge_reset do that after action completes
     # This keeps buffer state consistent if Ctrl+C is pressed
     CURSOR=${#BUFFER}
     zle redisplay
-    
+
     # Handle aliases - convert to their actual agent names
     case "$user_action" in
         ask)
@@ -133,7 +133,7 @@ function forge-accept-line() {
             user_action="muse"
         ;;
     esac
-    
+
     # ⚠️  IMPORTANT: When adding a new command here, you MUST also update:
     #     crates/forge_main/src/built_in_commands.json
     #     Add a new entry: {"command": "name", "description": "Description [alias: x]"}
@@ -145,7 +145,7 @@ function forge-accept-line() {
     # prompt from command output during window resize/reflow.
     _forge_osc133_emit "B"
     _forge_osc133_emit "C"
-    
+
     # Dispatch to appropriate action handler using pattern matching
     case "$user_action" in
         new|n)
@@ -266,11 +266,11 @@ function forge-accept-line() {
             _forge_action_default "$user_action" "$input_text"
         ;;
     esac
-    
+
     local action_status=$?
     _forge_osc133_emit "D;$action_status"
     _forge_osc133_emit "A"
-    
+
     # Centralized reset after all actions complete
     # This ensures consistent prompt state without requiring each action to call _forge_reset
     # Exceptions: editor, commit-preview, and suggest actions return early as they intentionally modify BUFFER
